@@ -60,7 +60,7 @@ inline float linear2sRGB( float v )
     }
     else
     {
-        return ( 1 + a ) * pow( v, 1/2.4f ) - a;
+        return ( 1 + a ) * powf( v, 1/2.4f ) - a;
     }
 }
 

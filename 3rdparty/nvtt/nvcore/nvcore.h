@@ -57,6 +57,7 @@
 #   define NV_OS_WIN32 1
 #elif defined POSH_OS_XBOX
 #   define NV_OS_XBOX 1
+#elif defined NM_PLATFORM_SWITCH
 #else
 #   error "Unsupported OS"
 #endif

@@ -92,7 +92,7 @@ extern "C" {
 // Use embedded miniz or not to decode ZIP format pixel. Linking with zlib
 // required if this flas is 0.
 #ifndef TINYEXR_USE_MINIZ
-#define TINYEXR_USE_MINIZ (1)
+#define TINYEXR_USE_MINIZ (0)
 #endif
 
 // Disable PIZ comporession when applying cpplint.
@@ -478,7 +478,7 @@ extern int LoadEXRFromMemory(float **out_rgba, int *width, int *height,
 #else
 //  Issue #46. Please include your own zlib-compatible API header before
 //  including `tinyexr.h`
-//#include "zlib.h"
+#include "source/common/helpers/miniz.h"
 #endif
 
 #if TINYEXR_USE_ZFP
@@ -7283,7 +7283,8 @@ static void WriteAttributeToMemory(std::vector<unsigned char> *out,
   out->insert(out->end(), data, data + len);
 }
 
-typedef struct {
+typedef struct _ChannelInfo 
+{
   std::string name;  // less than 255 bytes long
   int pixel_type;
   int x_sampling;
@@ -7292,8 +7293,8 @@ typedef struct {
   unsigned char pad[3];
 } ChannelInfo;
 
-typedef struct {
-  std::vector<tinyexr::ChannelInfo> channels;
+typedef struct _HeaderInfo {
+  std::vector<ChannelInfo> channels;
   std::vector<EXRAttribute> attributes;
 
   int data_window[4];

@@ -4,6 +4,7 @@
  */
 
 #include <stdio.h>
+#include <assert.h>
 #include <bx/allocator.h>
 #include <bx/readerwriter.h>
 #include <bx/endian.h>
@@ -11,6 +12,8 @@
 
 #include <bimg/decode.h>
 #include <bimg/encode.h>
+#include <bx/cpu.h>
+#include <bx/os.h>
 
 #if 0
 #	define DBG(_format, ...) fprintf(stderr, "" _format "\n", ##__VA_ARGS__)
@@ -60,12 +63,14 @@ struct Options
 			, equirect  ? "true" : "false"
 			, strip     ? "true" : "false"
 			, linear    ? "true" : "false"
+			, downSample
 			);
 	}
 
 	uint32_t maxSize = UINT32_MAX;
 	uint32_t mipSkip = 0;
 	float edge       = 0.0f;
+	uint32_t downSample = 0;
 	bimg::TextureFormat::Enum format   = bimg::TextureFormat::Count;
 	bimg::Quality::Enum quality        = bimg::Quality::Default;
 	bimg::LightingModel::Enum radiance = bimg::LightingModel::Count;
@@ -893,6 +898,328 @@ void help(const char* _str, const bx::Error& _err)
 	help(str.c_str(), false);
 }
 
+#include <thread>
+#include <bx/thread.h>
+
+int32_t cpu_count()
+{
+    return std::thread::hardware_concurrency();
+}
+
+#define PATH_MAX 260
+
+struct texture_job
+{
+	char inputFileName[PATH_MAX];
+	char outputFileName[PATH_MAX];
+	const char* saveAs;	//Len 16
+	Options options;
+};
+
+struct jobQueue
+{
+	tinystl::vector<texture_job> jobs;
+
+	uint32_t m_Index; //Atomic - index
+	uint32_t m_Count;
+	bool m_Locked;
+
+	jobQueue()
+		: m_Index(0)
+		, m_Count(0)
+		, m_Locked(false)
+	{
+	}
+
+	void Queue(texture_job const& newJob)
+	{
+		//Check flag + push to back of vector
+		BX_CHECK(m_Locked == false);
+		if (m_Locked) return;
+
+		jobs.push_back(newJob);
+	}
+
+	void Ready()
+	{
+		//Set flag, ready counter, set count
+		m_Locked = true;
+		m_Count = jobs.size();
+	}
+
+	texture_job *Dequeue()
+	{
+		//Check flag, Atomic inc - check bounds - return if >=
+		if (m_Index >= m_Count)
+			return nullptr;
+
+		uint32_t currentIndex = bx::atomicFetchAndAdd<uint32_t>(&m_Index, 1);
+
+		if (currentIndex < m_Count)
+			return &jobs[currentIndex];
+
+		return nullptr;
+	}
+
+	float progressPerc()
+	{
+		return (float)progressCount() / m_Count;
+	}
+	int32_t progressCount()
+	{
+		return (m_Index <= m_Count) ? m_Index : m_Count;
+	}
+
+	bool empty()
+	{
+		return m_Index >= m_Count;
+	}
+};
+
+struct workerContext
+{
+	jobQueue *jobs;
+	int32_t threadID;
+
+	bx::Thread thread;
+};
+
+unsigned int nextPowerOf2(unsigned int n)
+{
+    unsigned int p = 1;
+    if (n && !(n & (n - 1)))
+        return n;
+    
+    while (p < n)
+        p <<= 1;
+    
+    return p;
+}
+
+
+int formatIsDXT(bimg::TextureFormat::Enum format)
+{
+	if ((int)format >= (int)(bimg::TextureFormat::BC1) &&
+		(int)format <= (int)(bimg::TextureFormat::BC7))
+
+		return 1;
+
+	return 0;
+}
+
+int containerIsKTX(const char *pFilename)
+{
+	if (strstr(pFilename, ".ktx"))
+		return true;
+
+	return false;
+}
+
+int formatIsKTX(bimg::TextureFormat::Enum format)
+{
+	if ((int)format >= (int)(bimg::TextureFormat::ETC1) &&
+		(int)format <= (int)(bimg::TextureFormat::ETC2A1))
+
+		return 1;
+
+	return 0;
+}
+
+int formatIsPVRTC(bimg::TextureFormat::Enum format)
+{
+	if ((int)format >= bimg::TextureFormat::PTC12 &&
+		(int)format <= bimg::TextureFormat::PTC24) 
+		return 1;
+
+	return 0;
+}
+
+#if BX_PLATFORM_WINDOWS
+
+#include <Shlobj.h>
+#include <tchar.h>
+
+
+
+BOOL ensurePathExists(char const* i_Path)
+{
+	char FullPath[MAX_PATH];
+	char *FileName;
+
+	GetFullPathName(i_Path, sizeof(FullPath), FullPath, &FileName);
+	*FileName = '\0';
+
+	SHCreateDirectoryEx(nullptr, FullPath, nullptr);
+	return true;
+}
+
+#elif BX_PLATFORM_OSX
+
+static void _mkdir(const char *dir) {
+    char tmp[MAX_PATH];
+    char *p = NULL;
+    size_t len;
+    
+    snprintf(tmp, sizeof(tmp),"%s",dir);
+    len = strlen(tmp);
+    if(tmp[len - 1] == '/')
+        tmp[len - 1] = 0;
+    for(p = tmp + 1; *p; p++)
+        if(*p == '/') {
+            *p = 0;
+            mkdir(tmp, S_IRWXU);
+            *p = '/';
+        }
+    mkdir(tmp, S_IRWXU);
+}
+
+bool ensurePathExists(char const* i_Path)
+{
+    char FullPath[MAX_PATH];
+    if (realpath(i_Path, FullPath) == 0) return false;
+    
+    _mkdir(FullPath);
+    
+    return true;
+}
+
+#endif
+
+
+
+
+uint32_t waitgroupCounter = 0;
+
+int32_t worker_thread(bx::Thread * /* pSelf */, void* i_Context)
+{
+	workerContext &context = *(workerContext*)i_Context;
+	jobQueue &jobs = *context.jobs;
+
+	texture_job *cJob;
+
+	while ((cJob = jobs.Dequeue()) != nullptr)
+	{
+		bx::Error err;
+		bx::FileReader reader;
+
+		// printf("%d : Processing: %s\n", 100 - (int)(jobs.progressPerc() * 100), cJob->inputFileName);
+							
+		if (!bx::open(&reader, cJob->inputFileName, &err))
+		{
+			printf("Failed to load file: %s", cJob->inputFileName);
+			continue;
+			//help("Failed to open input file.", err);
+			//return EXIT_FAILURE;
+		}
+
+		uint32_t inputSize = (uint32_t)bx::getSize(&reader);
+		if (0 == inputSize)
+		{
+			printf("Failed to read input: %s", cJob->inputFileName);
+			continue;
+		}
+
+		bx::DefaultAllocator allocator;
+		uint8_t* inputData = (uint8_t*)BX_ALLOC(&allocator, inputSize);
+
+		bx::read(&reader, inputData, inputSize, &err);
+		bx::close(&reader);
+
+		if (!err.isOk())
+		{
+			printf("Failed to read input file: %s", cJob->inputFileName);
+			continue;
+		}
+
+		//TODO: Add a resize option here
+		bimg::ImageContainer* output = convert(&allocator, inputData, inputSize, cJob->options, &err);
+
+
+		BX_FREE(&allocator, inputData);
+
+
+		if (NULL != output)
+		{
+			std::string outputFileName = std::string(cJob->outputFileName);
+			if(!strchr(cJob->outputFileName,'.'))
+				outputFileName += (std::string(".") + std::string(cJob->saveAs));
+			ensurePathExists(cJob->outputFileName);
+			bx::FileWriter writer;
+
+			if (bx::open(&writer, outputFileName.c_str(), false, &err))
+			{
+				if (formatIsDXT(cJob->options.format))
+				{
+					bimg::imageWriteDds(&writer, *output, output->m_data, output->m_size, &err);
+				}
+				//else if (formatIsPVRTC(cJob->options.format))
+				//{
+				//	// already written
+				//}
+				else if( formatIsKTX(cJob->options.format) || containerIsKTX(cJob->outputFileName))
+				{
+					bimg::imageWriteKtx(&writer, *output, output->m_data, output->m_size, &err);
+				}
+			/*	else if (cJob->options.format == bimg::TextureFormat::A8)
+				{
+					bimg::imageWritePng(&writer
+									, output->m_width
+									, output->m_height
+									, output->m_width
+									, output->m_data
+									, output->m_format
+									, false
+									, &err
+									);
+				}*/
+                else
+                {
+					assert(false); //TODO: This might need fixing up 
+                    continue;
+                }
+
+				bx::close(&writer);
+
+				if (!err.isOk())
+				{
+					continue;
+				}
+			}
+			else
+			{
+				printf("Failed to open output file.: %s", cJob->inputFileName);
+				continue;
+			}
+
+			bimg::imageFree(output);
+		}
+		else
+		{
+			continue;
+		}
+	}
+
+//	printf("Thread %d: Exiting\n", context.threadID);
+	bx::atomicSubAndFetch<uint32_t>(&waitgroupCounter,1);
+	return 1;
+}
+
+void addFileJob(
+	tinystl::string i_FilePath,
+	tinystl::string i_OutFilePath,
+	jobQueue &i_jobs,
+	Options i_Options,
+	const char *as)
+{
+	texture_job texJob;
+	bx::strCopy(texJob.inputFileName, sizeof(texJob.inputFileName), i_FilePath.c_str());
+	bx::strCopy(texJob.outputFileName, sizeof(texJob.outputFileName), i_OutFilePath.c_str());
+
+	texJob.options = i_Options;
+	texJob.saveAs = as;
+	i_jobs.Queue(texJob);
+}
+
 class AlignedAllocator : public bx::AllocatorI
 {
 public:
@@ -937,8 +1264,38 @@ int main(int _argc, const char* _argv[])
 		help();
 		return bx::kExitFailure;
 	}
+	bx::arglist outFileArgs;
+	bx::arglist fileArgs;
+	const char* inputFileName = nullptr;
+	const char* outputFileName = nullptr;
 
-    if (cmdLine.hasArg("formats"))
+	const char* fileList = cmdLine.findOption("filelist");
+
+	if (fileList != nullptr)
+	{	
+		FILE *file = fopen(fileList, "r");
+		if (file != NULL)
+		{
+			char line[2048];
+			bool isSource = true;
+			while (fgets(line, sizeof line, file) != NULL) /* read a line */
+			{
+				size_t strLen = strlen(line);
+				if (strLen && line[strLen - 1] == '\n') line[strLen - 1] = '\0';
+
+				if (isSource) fileArgs.push_back(tinystl::string(line));
+				else outFileArgs.push_back(tinystl::string(line));
+				isSource = !isSource;
+			}
+			fclose(file);
+		}
+		else
+		{
+			help("Failed to open list file");
+			return EXIT_FAILURE; 
+		};
+	}
+	else  if (cmdLine.hasArg("formats"))
     {
         printf("Uncompressed formats:\n");
 
@@ -955,21 +1312,57 @@ int main(int _argc, const char* _argv[])
 
         return bx::kExitSuccess;
     }
+	else if (cmdLine.hasArg('\0', "stdin"))
+	{
 
-	const char* inputFileName = cmdLine.findOption('f');
+		//Read all from the input
+		const size_t argBufferSize = 1024 * 1024 * 10;
+		char* argBuffer = new char[argBufferSize];	//Should be more than enough for anyone!
+		fgets(argBuffer, argBufferSize, stdin);
+
+		//Parse the buffer out into src and dst files - semi-colon
+		char* argPtr = argBuffer;
+		char* argStart = argBuffer;
+		bool isSource = true;
+		do
+		{
+			argPtr++;
+			if (*argPtr == ';' || *argPtr == '\0' || *argPtr == '\n')
+			{
+				const ptrdiff_t argSize = argPtr - argStart;
+				if (argSize > 0)
+				{
+					if (isSource) fileArgs.push_back(tinystl::string(argStart, argSize));
+					else outFileArgs.push_back(tinystl::string(argStart, argSize));
+					isSource = !isSource;
+				}
+				argStart = argPtr + 1;
+			}
+		} while (*argPtr != '\0' && *argPtr != '\n');
+
+		delete[] argBuffer;
+	}
+else
+{
+	inputFileName = cmdLine.findOption('f');
 	if (NULL == inputFileName)
 	{
 		help("Input file must be specified.");
 		return bx::kExitFailure;
 	}
 
-	const char* outputFileName = cmdLine.findOption('o');
+	outputFileName = cmdLine.findOption('o');
 	if (NULL == outputFileName)
 	{
 		help("Output file must be specified.");
 		return bx::kExitFailure;
 	}
-
+}
+	if (fileArgs.size() != outFileArgs.size())
+	{
+		help("Must have the same number of -f and -o");
+		return EXIT_FAILURE;
+	}
 	bx::StringView saveAs = cmdLine.findOption("as");
 	saveAs = saveAs.isEmpty() ? bx::strFindI(outputFileName, ".ktx") : saveAs;
 	saveAs = saveAs.isEmpty() ? bx::strFindI(outputFileName, ".dds") : saveAs;
@@ -1096,8 +1489,25 @@ int main(int _argc, const char* _argv[])
 			return bx::kExitFailure;
 		}
 	}
+	
+	options.downSample = 1;
+
+	const char* downscale = cmdLine.findOption('x');
+	if (NULL != downscale)
+	{
+		int res = sscanf(downscale, "%d", &options.downSample);
+		if(!res || (res == 1 && options.downSample > 1 && options.downSample & 1))
+		{
+			char buf[265];
+			sprintf(buf,"Invalid downscale specified : must be 1 or even : %d",options.downSample);
+			help(buf);
+			return EXIT_FAILURE;
+		}
+	}		
 
 	const bool validate = cmdLine.hasArg("validate");
+	
+#if 0	
 
 	bx::Error err;
 	bx::FileReader reader;
@@ -1292,6 +1702,37 @@ int main(int _argc, const char* _argv[])
 		help(NULL, err);
 		return bx::kExitFailure;
 	}
+#endif
+	jobQueue jobs;
+
+	for (int idx = 0; idx < (int)fileArgs.size(); idx++)
+	{
+		addFileJob(fileArgs[idx], outFileArgs[idx], jobs, options, saveAs.getPtr());
+	}
+
+	jobs.Ready();
+
+	const int kMaxWorkers = 1;
+	workerContext threads[kMaxWorkers];
+	const int targetCount = (cpu_count() > 1) ? cpu_count() -1 : 1;
+	const int workerCount = (targetCount > kMaxWorkers) ? kMaxWorkers : targetCount;
+
+	for (int workerIdx = 0; workerIdx < workerCount; workerIdx++)
+	{
+		char sThreadName[32];
+		bx::snprintf(sThreadName, sizeof(sThreadName), "Worker thread %d", workerIdx);
+		bx::atomicAddAndFetch<uint32_t>(&waitgroupCounter,1);
+		threads[workerIdx].jobs = &jobs;
+		threads[workerIdx].threadID = workerIdx;
+		threads[workerIdx].thread.init(worker_thread, &threads[workerIdx], 0, "worker thread");
+	}
+
+	while (waitgroupCounter != 0)
+	{
+		bx::sleep(10);
+	}
+
+
 
 	return bx::kExitSuccess;
 }
