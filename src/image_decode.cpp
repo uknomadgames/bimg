@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2018 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2020 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bimg#license-bsd-2-clause
  */
 
@@ -303,6 +303,75 @@ namespace bimg
 						bx::memCopy( (uint8_t*)output->m_data + ii*4, state.info_raw.palette + data[ii]*4, 4);
 					}
 				}
+
+				switch (state.info_raw.colortype) //Check for alpha values
+				{
+					case LCT_GREY:
+					case LCT_RGB:
+						break;
+
+					case LCT_GREY_ALPHA:
+						if (8 == state.info_raw.bitdepth)
+						{
+							for (uint32_t ii = 0, num = width * height; ii < num; ++ii)
+							{
+								const uint8_t* rgba = (uint8_t*)data + ii * 2;
+								bool has_alpha = rgba[1] < UINT8_MAX;
+								if (has_alpha)
+								{
+									output->m_hasAlpha = has_alpha;
+									break;
+								}
+							}
+						}
+						else if(16 == state.info_raw.bitdepth)
+						{
+							for (uint32_t ii = 0, num = width * height; ii < num; ++ii)
+							{
+								const uint16_t* rgba = (uint16_t*)data + ii * 2;
+								bool has_alpha = rgba[1] < UINT16_MAX;
+								if (has_alpha)
+								{
+									output->m_hasAlpha = has_alpha;
+									break;
+								}
+							}
+						}
+						break;
+
+					case LCT_RGBA:
+						if (8 == state.info_raw.bitdepth)
+						{
+							for (uint32_t ii = 0, num = width * height; ii < num; ++ii)
+							{
+								const uint8_t* dst = (uint8_t*)output->m_data + ii * 4;
+								bool has_alpha = dst[3] < UINT8_MAX;
+								if (has_alpha)
+								{
+									output->m_hasAlpha = has_alpha;
+									break;
+								}
+							}
+						}
+						else if (16 == state.info_raw.bitdepth)
+						{
+							for (uint32_t ii = 0, num = width * height; ii < num; ++ii)
+							{
+								const uint16_t* dst = (uint16_t*)output->m_data + ii * 4;
+								bool has_alpha = dst[3] < UINT16_MAX;
+								if (has_alpha)
+								{
+									output->m_hasAlpha = has_alpha;
+									break;
+								}
+							}
+						}
+						break;
+
+					case LCT_PALETTE:
+						output->m_hasAlpha = lodepng_has_palette_alpha(&state.info_raw);
+						break;
+				}
 			}
 			else
 			{
@@ -330,6 +399,8 @@ namespace bimg
 		bimg::TextureFormat::Enum format = bimg::TextureFormat::RGBA8;
 		uint32_t width  = 0;
 		uint32_t height = 0;
+
+		bool hasAlpha = false;
 
 		uint8_t* data = NULL;
 		const char* err = NULL;
@@ -431,6 +502,8 @@ namespace bimg
 							};
 							bx::memCopy(&data[ii * bytesPerPixel], rgba, bytesPerPixel);
 
+							hasAlpha |= (hasAlpha || rgba[3] < 1.0f);
+
 							srcR += stepR;
 							srcG += stepG;
 							srcB += stepB;
@@ -457,6 +530,8 @@ namespace bimg
 							};
 							bx::memCopy(&data[ii * bytesPerPixel], rgba, bytesPerPixel);
 
+							hasAlpha |= (hasAlpha || rgba[3] < UINT16_MAX);
+
 							srcR += stepR;
 							srcG += stepG;
 							srcB += stepB;
@@ -473,7 +548,22 @@ namespace bimg
 			}
 			else
 			{
-				BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image.");
+				switch (result)
+				{
+				case TINYEXR_ERROR_INVALID_MAGIC_NUMBER: BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid magic number."); break;
+				case TINYEXR_ERROR_INVALID_EXR_VERSION:	 BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid EXR version.");  break;
+				case TINYEXR_ERROR_INVALID_ARGUMENT:     BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid argument.");     break;
+				case TINYEXR_ERROR_INVALID_DATA:         BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid data.");         break;
+				case TINYEXR_ERROR_INVALID_FILE:         BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid file.");         break;
+//				case TINYEXR_ERROR_INVALID_PARAMETER:    BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid parameter.");    break;
+				case TINYEXR_ERROR_CANT_OPEN_FILE:       BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Can't open file.");      break;
+				case TINYEXR_ERROR_UNSUPPORTED_FORMAT:   BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Unsupported format.");   break;
+				case TINYEXR_ERROR_INVALID_HEADER:       BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Invalid header.");       break;
+				case TINYEXR_ERROR_UNSUPPORTED_FEATURE:  BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Unsupported feature.");  break;
+				case TINYEXR_ERROR_CANT_WRITE_FILE:      BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Can't write file.");     break;
+				case TINYEXR_ERROR_SERIALZATION_FAILED:  BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image. Serialization failed."); break;
+				default:                                 BX_ERROR_SET(_err, BIMG_ERROR, "EXR: Failed to parse image.");                       break;
+				}
 			}
 
 			FreeEXRHeader(&exrHeader);
@@ -497,7 +587,9 @@ namespace bimg
 				, data
 				);
 			BX_FREE(_allocator, data);
+			output->m_hasAlpha = hasAlpha;
 		}
+
 
 		return output;
 	}
@@ -632,7 +724,10 @@ namespace bimg
 
 				for (uint32_t ii = 0; err.isOk() && ii < numEntries; ++ii)
 				{
-					// https://sno.phy.queensu.ca/~phil/exiftool/TagNames/EXIF.html
+					// Reference(s):
+					// - EXIF Tags
+					//   https://web.archive.org/web/20190218005249/https://sno.phy.queensu.ca/~phil/exiftool/TagNames/EXIF.html
+					//
 					uint16_t tag;
 					bx::readHE(&reader, tag, littleEndian, &err);
 

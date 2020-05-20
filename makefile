@@ -1,5 +1,5 @@
 #
-# Copyright 2011-2018 Branimir Karadzic. All rights reserved.
+# Copyright 2011-2020 Branimir Karadzic. All rights reserved.
 # License: https://github.com/bkaradzic/bimg#license-bsd-2-clause
 #
 
@@ -39,9 +39,6 @@ clean: ## Clean all intermediate files.
 	@mkdir .build
 
 projgen: ## Generate project files for all configurations.
-	$(GENIE) --with-tools                     vs2012
-	$(GENIE) --with-tools                     vs2013
-	$(GENIE) --with-tools                     vs2015
 	$(GENIE) --with-tools                     vs2017
 	$(GENIE) --with-tools --gcc=mingw-gcc     gmake
 	$(GENIE) --with-tools --gcc=linux-gcc     gmake
@@ -50,9 +47,10 @@ projgen: ## Generate project files for all configurations.
 	$(GENIE) --with-tools --xcode=ios         xcode8
 	$(GENIE)              --gcc=freebsd       gmake
 	$(GENIE)                                --gcc=android-arm     gmake
-	$(GENIE)                                --gcc=android-mips    gmake
+	$(GENIE)                                --gcc=android-arm64   gmake
 	$(GENIE)                                --gcc=android-x86     gmake
-	$(GENIE)                                --gcc=asmjs           gmake
+	$(GENIE)                                --gcc=wasm2js         gmake
+	$(GENIE)                                --gcc=wasm            gmake
 	$(GENIE)                                --gcc=ios-arm         gmake
 	$(GENIE)                                --gcc=ios-arm64       gmake
 	$(GENIE)                                --gcc=ios-simulator   gmake
@@ -67,13 +65,13 @@ android-arm-release: .build/projects/gmake-android-arm ## Build - Android ARM Re
 	$(MAKE) -R -C .build/projects/gmake-android-arm config=release
 android-arm: android-arm-debug android-arm-release ## Build - Android ARM Debug and Release
 
-.build/projects/gmake-android-mips:
-	$(GENIE) --gcc=android-mips gmake
-android-mips-debug: .build/projects/gmake-android-mips ## Build - Android MIPS Debug
-	$(MAKE) -R -C .build/projects/gmake-android-mips config=debug
-android-mips-release: .build/projects/gmake-android-mips ## Build - Android MIPS Release
-	$(MAKE) -R -C .build/projects/gmake-android-mips config=release
-android-mips: android-mips-debug android-mips-release ## Build - Android MIPS Debug and Release
+.build/projects/gmake-android-arm64:
+	$(GENIE) --gcc=android-arm64 gmake
+android-arm64-debug: .build/projects/gmake-android-arm64 ## Build - Android ARM64 Debug
+	$(MAKE) -R -C .build/projects/gmake-android-arm64 config=debug
+android-arm64-release: .build/projects/gmake-android-arm64 ## Build - Android ARM64 Release
+	$(MAKE) -R -C .build/projects/gmake-android-arm64 config=release
+android-arm64: android-arm64-debug android-arm64-release ## Build - Android ARM64 Debug and Release
 
 .build/projects/gmake-android-x86:
 	$(GENIE) --gcc=android-x86 gmake
@@ -83,13 +81,21 @@ android-x86-release: .build/projects/gmake-android-x86 ## Build - Android x86 De
 	$(MAKE) -R -C .build/projects/gmake-android-x86 config=release
 android-x86: android-x86-debug android-x86-release ## Build - Android x86 Debug and Release
 
-.build/projects/gmake-asmjs:
-	$(GENIE) --gcc=asmjs gmake
-asmjs-debug: .build/projects/gmake-asmjs ## Build - Emscripten Debug
-	$(MAKE) -R -C .build/projects/gmake-asmjs config=debug
-asmjs-release: .build/projects/gmake-asmjs ## Build - Emscripten Release
-	$(MAKE) -R -C .build/projects/gmake-asmjs config=release
-asmjs: asmjs-debug asmjs-release ## Build - Emscripten Debug and Release
+.build/projects/gmake-wasm2js:
+	$(GENIE) --gcc=wasm2js gmake
+wasm2js-debug: .build/projects/gmake-wasm2js ## Build - Emscripten Debug
+	$(MAKE) -R -C .build/projects/gmake-wasm2js config=debug
+wasm2js-release: .build/projects/gmake-wasm2js ## Build - Emscripten Release
+	$(MAKE) -R -C .build/projects/gmake-wasm2js config=release
+wasm2js: wasm2js-debug wasm2js-release ## Build - Emscripten Debug and Release
+
+.build/projects/gmake-wasm:
+	$(GENIE) --gcc=wasm gmake
+wasm-debug: .build/projects/gmake-wasm ## Build - Emscripten Debug
+	$(MAKE) -R -C .build/projects/gmake-wasm config=debug
+wasm-release: .build/projects/gmake-wasm ## Build - Emscripten Release
+	$(MAKE) -R -C .build/projects/gmake-wasm config=release
+wasm: wasm-debug wasm-release ## Build - Emscripten Debug and Release
 
 .build/projects/gmake-linux:
 	$(GENIE) --with-tools --gcc=linux-gcc gmake
@@ -134,42 +140,6 @@ mingw-clang-debug64: .build/projects/gmake-mingw-clang ## Build - MinGW Clang x6
 mingw-clang-release64: .build/projects/gmake-mingw-clang ## Build - MinGW Clang x64 Release
 	$(MAKE) -R -C .build/projects/gmake-mingw-clang config=release64
 mingw-clang: mingw-clang-debug32 mingw-clang-release32 mingw-clang-debug64 mingw-clang-release64 ## Build - MinGW Clang x86/x64 Debug and Release
-
-.build/projects/vs2012:
-	$(GENIE) --with-tools vs2012
-vs2012-debug32: .build/projects/vs2012 ## Build - VS2012 x86 Debug
-	devenv .build/projects/vs2012/bimg.sln /Build "Debug|Win32"
-vs2012-release32: .build/projects/vs2012 ## Build - VS2012 x86 Release
-	devenv .build/projects/vs2012/bimg.sln /Build "Release|Win32"
-vs2012-debug64: .build/projects/vs2012 ## Build - VS2012 x64 Debug
-	devenv .build/projects/vs2012/bimg.sln /Build "Debug|x64"
-vs2012-release64: .build/projects/vs2012 ## Build - VS2012 x64 Release
-	devenv .build/projects/vs2012/bimg.sln /Build "Release|x64"
-vs2012: vs2012-debug32 vs2012-release32 vs2012-debug64 vs2012-release64 ## Build - VS2012 x86/x64 Debug and Release
-
-.build/projects/vs2013:
-	$(GENIE) --with-tools vs2013
-vs2013-debug32: .build/projects/vs2013 ## Build - VS2013 x86 Debug
-	devenv .build/projects/vs2013/bimg.sln /Build "Debug|Win32"
-vs2013-release32: .build/projects/vs2013 ## Build - VS2013 x86 Release
-	devenv .build/projects/vs2013/bimg.sln /Build "Release|Win32"
-vs2013-debug64: .build/projects/vs2013 ## Build - VS2013 x64 Debug
-	devenv .build/projects/vs2013/bimg.sln /Build "Debug|x64"
-vs2013-release64: .build/projects/vs2013 ## Build - VS2013 x64 Release
-	devenv .build/projects/vs2013/bimg.sln /Build "Release|x64"
-vs2013: vs2013-debug32 vs2013-release32 vs2013-debug64 vs2013-release64 ## Build - VS2013 x86/x64 Debug and Release
-
-.build/projects/vs2015:
-	$(GENIE) --with-tools vs2015
-vs2015-debug32: .build/projects/vs2015 ## Build - VS2015 x86 Debug
-	devenv .build/projects/vs2015/bimg.sln /Build "Debug|Win32"
-vs2015-release32: .build/projects/vs2015 ## Build - VS2015 x86 Release
-	devenv .build/projects/vs2015/bimg.sln /Build "Release|Win32"
-vs2015-debug64: .build/projects/vs2015 ## Build - VS2015 x64 Debug
-	devenv .build/projects/vs2015/bimg.sln /Build "Debug|x64"
-vs2015-release64: .build/projects/vs2015 ## Build - VS2015 x64 Release
-	devenv .build/projects/vs2015/bimg.sln /Build "Release|x64"
-vs2015: vs2015-debug32 vs2015-release32 vs2015-debug64 vs2015-release64 ## Build - VS2015 x86/x64 Debug and Release
 
 .build/projects/vs2017:
 	$(GENIE) --with-tools vs2017
